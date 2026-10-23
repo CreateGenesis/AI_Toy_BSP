@@ -1,0 +1,79 @@
+diff --git a/tuyaos/tuyaos_adapter/src/driver/tkl_audio.c b/tuyaos/tuyaos_adapter/src/driver/tkl_audio.c
+index c84cab62..04fa4822 100644
+--- a/tuyaos/tuyaos_adapter/src/driver/tkl_audio.c
++++ b/tuyaos/tuyaos_adapter/src/driver/tkl_audio.c
+@@ -406,7 +406,9 @@ OPERATE_RET tkl_ai_init(TKL_AUDIO_CONFIG_T *pconfig, int32_t count)
+     if (voice_cfg.spk_type == SPK_TYPE_ONBOARD) {
+         onboard_speaker_stream_cfg_t onboard_spk_cfg =
+             ONBOARD_SPEAKER_STREAM_CFG_DEFAULT();
+-        onboard_spk_cfg.task_prio = 1;
++        onboard_spk_cfg.task_prio = 5;
++        /* Voice service accepts only one speaker channel. Both DAC sides
++         * are enabled after init so AUDIO_LN is not left at 0 V. */
+         if (pconfig->spk_volume) {
+             if (pconfig->spk_volume <= 30) {
+                 // 0-30% 映射到 0-50%
+@@ -490,6 +492,13 @@ OPERATE_RET tkl_ai_init(TKL_AUDIO_CONFIG_T *pconfig, int32_t count)
+         goto error;
+     }
+ 
++    /* Schematic AUDIO_LP/LN is differential. Left-only leaves AUDIO_LN at 0 V. */
++    if (bk_aud_dac_set_chl(AUD_DAC_CHL_LR) != BK_OK) {
++        bk_printf("dac LR enable fail\r\n");
++    } else {
++        bk_printf("dac LR enabled\r\n");
++    }
++
+     if (pconfig->spk_gpio < 56) {
+         TUYA_GPIO_BASE_CFG_T cfg;
+         cfg.direct = TUYA_GPIO_OUTPUT;
+@@ -817,6 +826,12 @@ OPERATE_RET tkl_ao_set_vol(int32_t card, TKL_AO_CHN_E chn, void *handle,
+             bk_aud_dac_mute();
+         } else {
+             bk_aud_dac_unmute();
++            /* Board playback needs the full DAC swing. The 50-70% remap
++             * above leaves a 1 kHz tone below the AW87390 noise gate. */
++            if (vol >= 100) {
++                volume = 0x3F;
++                bk_aud_dac_set_ana_gain(0x0F);
++            }
+         }
+     } else {
+         volume = (vol);
+@@ -1039,4 +1054,36 @@ OPERATE_RET tkl_ai_set_vad_aec_algorithm(aec_vad_process_fun user_process_fun)
+     extern bk_err_t aec_v3_algorithm_set_user_process(aec_vad_process_fun user_process_fun);
+     aec_v3_algorithm_set_user_process(user_process_fun);
+ }
++
++void chat_robot_dac_tone_loop(void)
++{
++    aud_dac_config_t dac_cfg = DEFAULT_AUD_DAC_CONFIG();
++    uint32_t writes = 0;
++    bk_err_t dac_rt;
++
++    dac_cfg.samp_rate = 16000;
++    dac_cfg.dac_gain = 0x3F;
++    dac_cfg.dac_chl = AUD_DAC_CHL_LR;
++    dac_cfg.work_mode = AUD_DAC_WORK_MODE_DIFFEN;
++    dac_rt = bk_aud_dac_init(&dac_cfg);
++    bk_printf("direct dac init %d\r\n", dac_rt);
++    bk_aud_dac_set_ana_gain(0x0F);
++    bk_aud_dac_unmute();
++    bk_aud_dac_start();
++    bk_printf("direct dac started\r\n");
++
++    while (1) {
++        uint32_t sample = ((writes % 16) < 8) ? 0x7FFF7FFF : 0x80008000;
++
++        if (bk_aud_dac_write(sample) != BK_OK) {
++            bk_printf("direct dac write fail at %u\r\n", writes);
++            tkl_system_sleep(20);
++            continue;
++        }
++        writes++;
++        if ((writes % 16000) == 0) {
++            bk_printf("direct dac writes %u\r\n", writes);
++        }
++    }
++}
+ #endif

@@ -1,0 +1,11 @@
+/TuyaOpen/
+/WukongSDK/
+/artifacts/
+/tmp/
+/secrets/
+/references/
+/.env
+/*.log
+**/.build/
+**/dist/
+**/using.config
