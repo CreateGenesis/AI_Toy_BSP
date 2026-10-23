@@ -13,8 +13,13 @@ application must not depend on Tuya's cloud conversation or product PID flow.
   when it is available, but its cloud AI demo is not the product application.
 - Transport: intentionally undecided. `firmware/include/toy_transport_port.h`
   reserves the boundary to the owner's platform.
-- Firmware: audio and transport port contracts are defined. No custom-board
-  adapter or deployable image exists until the schematic and SDK are verified.
+- Firmware: the `CHAT_ROBOT_T5E1` TuyaOpen adapter is in use. Speaker
+  playback is verified on the board with `bash scripts/build-tone.sh`.
+  Microphone, key and AEC are tested push-to-talk (hold the key to record,
+  release to play) with `bash scripts/build-aec-loopback.sh`; see
+  [the test](docs/aec-loopback-test.md). `firmware/apps/voice_gateway/`
+  is the owner's gateway client. LEDs, battery ADC and the conversation
+  flow are not verified on the board.
 
 Run `bash scripts/check.sh` on the remote host for current dependencies and
 blockers. `bash scripts/build.sh` refuses to build a cloud demo as the product.

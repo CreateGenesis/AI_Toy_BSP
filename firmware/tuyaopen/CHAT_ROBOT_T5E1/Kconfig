@@ -12,3 +12,10 @@ config BOARD_CONFIG
     select ENABLE_AUDIO_CODECS
     select ENABLE_AUDIO_AEC
     select ENABLE_BUTTON
+
+config CHAT_ROBOT_T5E1_AEC
+    bool "Enable T5 AEC capture (MIC1 + MICP2/MICN2 loopback)"
+    default n
+    help
+        Runs the ADC with two channels: the main microphone and the filtered
+        SP+/SP- reference. Off for the verified playback test.
