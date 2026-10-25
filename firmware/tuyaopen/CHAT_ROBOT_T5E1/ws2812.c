@@ -42,10 +42,19 @@ static bool s_ready = false;
 static CHAT_ROBOT_RGB_T s_hold[CHAT_ROBOT_WS2812_COUNT];
 static THREAD_HANDLE s_hold_thread = NULL;
 
-static inline void ws2812_wait_until(uint32_t start, uint32_t cycles)
+/* Busy-waits until `cycles` have elapsed since `start`. Runs with interrupts
+ * off, so it must always end: each pass costs at least one cycle, so after
+ * `cycles` passes the time is up or the counter has stopped. */
+static inline bool ws2812_wait_until(uint32_t start, uint32_t cycles)
 {
+    uint32_t guard = cycles;
+
     while ((DWT_CYCCNT - start) < cycles) {
+        if (0 == guard--) {
+            return false;
+        }
     }
+    return true;
 }
 
 /* Measures the CPU clock against the millisecond tick over 50 ms. */
@@ -103,6 +112,7 @@ OPERATE_RET chat_robot_ws2812_show(const CHAT_ROBOT_RGB_T colors[CHAT_ROBOT_WS28
 {
     uint8_t bytes[CHAT_ROBOT_WS2812_COUNT * 3];
     uint32_t irq, i;
+    bool ok = true;
 
     if (!s_ready) {
         return OPRT_RESOURCE_NOT_READY;
@@ -113,26 +123,35 @@ OPERATE_RET chat_robot_ws2812_show(const CHAT_ROBOT_RGB_T colors[CHAT_ROBOT_WS28
         bytes[i * 3 + 2] = colors[i].b;
     }
 
+    /* Other code may reconfigure the debug unit; re-arm the counter. */
+    DWT_DEMCR |= (1u << 24);
+    DWT_CTRL |= 1u;
+
     irq = tkl_system_enter_critical();
-    for (i = 0; i < sizeof(bytes); i++) {
+    for (i = 0; i < sizeof(bytes) && ok; i++) {
         uint8_t v = bytes[i];
         int b;
 
-        for (b = 7; b >= 0; b--) {
+        for (b = 7; b >= 0 && ok; b--) {
             bool one = (v >> b) & 1u;
             uint32_t t = DWT_CYCCNT;
 
             *WS2812_GPIO_REG = s_out_hi;
             __asm volatile("dsb" ::: "memory");
-            ws2812_wait_until(t, one ? s_t1h : s_t0h);
+            ok = ws2812_wait_until(t, one ? s_t1h : s_t0h);
             t = DWT_CYCCNT;
             *WS2812_GPIO_REG = s_out_lo;
             __asm volatile("dsb" ::: "memory");
-            ws2812_wait_until(t, one ? s_t1l : s_t0l);
+            ok = ok && ws2812_wait_until(t, one ? s_t1l : s_t0l);
         }
     }
+    *WS2812_GPIO_REG = s_out_lo;
     tkl_system_exit_critical(irq);
     tal_system_sleep(WS2812_RESET_MS);
+    if (!ok) {
+        PR_ERR("WS2812: cycle counter stalled, frame aborted");
+        return OPRT_COM_ERROR;
+    }
     return OPRT_OK;
 }
 

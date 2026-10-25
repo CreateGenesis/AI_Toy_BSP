@@ -40,6 +40,7 @@
 
 #include "gw_config.h"
 #include "gw_proto.h"
+#include "auth_sdk_port.h"
 
 #define GW_SAMPLE_HZ          16000
 #define GW_FRAME_MS           80
@@ -53,6 +54,7 @@
 #define GW_STEP_TIMEOUT_MS    5000
 #define GW_PONG_TIMEOUT_MS    10000
 #define GW_RECV_POLL_MS       1000
+#define GW_JSON_CAP            4608
 
 typedef enum {
     EV_AUTH_OK,
@@ -88,6 +90,8 @@ static volatile bool s_rx_alive = false;
 static volatile bool s_wifi_up = false;
 static volatile bool s_key_down = false;
 static uint32_t s_ping_interval_ms = 20000;
+static auth_sdk_port_t s_auth;
+static bool s_auth_initialized = false;
 
 static uint8_t *s_rx_buf = NULL;
 static uint8_t s_tx_buf[GW_TCP_HEADER_LEN + GW_AUDIO_HEADER_LEN + GW_MAX_AUDIO_PAYLOAD];
@@ -248,7 +252,7 @@ static int gw_send_json(const char *json)
  * the Gateway drops the link on invalid JSON without an error reply. */
 static int gw_send_jsonf(const char *fmt, ...)
 {
-    char json[256];
+    char json[GW_JSON_CAP];
     va_list args;
     int n;
 
@@ -260,6 +264,64 @@ static int gw_send_jsonf(const char *fmt, ...)
         return -1;
     }
     return gw_send_json(json);
+}
+
+static bool gw_auth_configured(void)
+{
+    return GW_AUTH_BASE_URL[0] != '\0' && GW_AUTH_ENDPOINT_ID[0] != '\0';
+}
+
+/* Auth is prepared only after Wi-Fi has an IP. The local token remains an
+ * explicit development fallback until the production endpoint is configured. */
+static int gw_auth_prepare(void)
+{
+    const char *token = NULL;
+    int result;
+
+    if (!gw_auth_configured()) {
+        if (GW_AUTH_REQUIRED) {
+            bk_printf("[gw] Auth SDK is required but GW_AUTH_BASE_URL/ENDPOINT_ID is empty\r\n");
+            return -1;
+        }
+        s_auth_initialized = false;
+        return 0;
+    }
+    if (!s_auth_initialized) {
+        result = auth_sdk_port_init(&s_auth, GW_AUTH_BASE_URL,
+                                    GW_AUTH_ACTIVATION_CODE[0] ? GW_AUTH_ACTIVATION_CODE : NULL,
+                                    GW_AUTH_ENDPOINT_ID);
+        if (result != AUTH_DEVICE_OK) {
+            bk_printf("[gw] Auth SDK init failed: %d\r\n", result);
+            return GW_AUTH_REQUIRED ? -1 : 0;
+        }
+        s_auth_initialized = true;
+        bk_printf("[gw] Auth SDK initialized\r\n");
+    }
+    result = auth_sdk_port_get_token(&s_auth, &token);
+    if (result != AUTH_DEVICE_OK || !token || !*token) {
+        bk_printf("[gw] Auth token request failed: %d\r\n", result);
+        return GW_AUTH_REQUIRED ? -1 : 0;
+    }
+    return 0;
+}
+
+static const char *gw_auth_token(void)
+{
+    const char *token = NULL;
+
+    if (s_auth_initialized && auth_sdk_port_get_token(&s_auth, &token) == AUTH_DEVICE_OK &&
+        token && *token) {
+        return token;
+    }
+    return GW_TOKEN;
+}
+
+static const char *gw_auth_device_id(void)
+{
+    if (s_auth_initialized && s_auth.client.device_id[0]) {
+        return s_auth.client.device_id;
+    }
+    return GW_DEVICE_ID;
 }
 
 static int gw_send_pcm(uint64_t session_id, uint32_t seq, uint16_t flags, const uint8_t *pcm, uint32_t len)
@@ -526,9 +588,13 @@ static bool gw_wait(uint32_t wanted_mask, uint32_t timeout_ms, GW_EVENT_T *ev)
 static GW_RESULT_E gw_handshake(void)
 {
     GW_EVENT_T ev;
+    const char *token = gw_auth_token();
+    const char *device_id = gw_auth_device_id();
 
-    gw_send_json("{\"type\":\"auth\",\"token\":\"" GW_TOKEN "\",\"device_id\":\"" GW_DEVICE_ID
-                 "\",\"firmware\":\"" GW_FIRMWARE "\"}");
+    if (gw_send_jsonf("{\"type\":\"auth\",\"token\":\"%s\",\"device_id\":\"%s\",\"firmware\":\"%s\"}",
+                      token, device_id, GW_FIRMWARE) != 0) {
+        return GW_LINK_LOST;
+    }
     if (!gw_wait(1u << EV_AUTH_OK, GW_STEP_TIMEOUT_MS, &ev) || EV_AUTH_OK != ev.kind) {
         bk_printf("[gw] auth failed (%s); check DEVICE_ID/TOKEN/FIRMWARE_VERSION in platform/.env\r\n",
                   EV_ERROR == ev.kind ? ev.code : "no auth.ok");
@@ -536,9 +602,11 @@ static GW_RESULT_E gw_handshake(void)
     }
     bk_printf("[gw] auth.ok\r\n");
 
-    gw_send_json("{\"type\":\"hello\",\"protocol_version\":1,\"device_id\":\"" GW_DEVICE_ID "\",\"firmware\":\"" GW_FIRMWARE
-                 "\",\"audio\":{\"up\":[\"pcm_s16le\"],\"down\":[\"mp3\"],\"sample_rate\":16000,\"channels\":1,"
-                 "\"bits_per_sample\":16,\"frame_ms\":80}}");
+    if (gw_send_jsonf("{\"type\":\"hello\",\"protocol_version\":1,\"device_id\":\"%s\",\"firmware\":\"%s\","
+                      "\"audio\":{\"up\":[\"pcm_s16le\"],\"down\":[\"mp3\"],\"sample_rate\":16000,\"channels\":1,"
+                      "\"bits_per_sample\":16,\"frame_ms\":80}}", device_id, GW_FIRMWARE) != 0) {
+        return GW_LINK_LOST;
+    }
     /* INVALID_HELLO leaves the link open but unusable: reconnect. */
     if (!gw_wait(1u << EV_HELLO_OK, GW_STEP_TIMEOUT_MS, &ev) || EV_HELLO_OK != ev.kind) {
         bk_printf("[gw] hello failed (%s)\r\n", EV_ERROR == ev.kind ? ev.code : "no hello.ok");
@@ -883,9 +951,11 @@ static OPERATE_RET gw_setup(void)
     TUYA_CALL_ERR_RETURN(tal_mutex_create_init(&s_tx_lock));
     TUYA_CALL_ERR_RETURN(tal_queue_create_init(&s_events, sizeof(GW_EVENT_T), 16));
 
+    bk_printf("[gw] opening audio\r\n");
     TUYA_CALL_ERR_RETURN(tdl_audio_find(AUDIO_CODEC_NAME, &s_audio));
     TUYA_CALL_ERR_RETURN(tdl_audio_open(s_audio, gw_mic_cb));
     TUYA_CALL_ERR_RETURN(tdl_audio_volume_set(s_audio, GW_VOLUME));
+    bk_printf("[gw] audio ready\r\n");
 
     TUYA_CALL_ERR_RETURN(tdl_button_create(BUTTON_NAME, &key_cfg, &key));
     tdl_button_event_register(key, TDL_BUTTON_PRESS_DOWN, gw_key_cb);
@@ -905,17 +975,19 @@ static void user_main(void)
     if (OPRT_OK != board_register_hardware()) {
         PR_ERR("board_register_hardware failed; AW87390 I2C on GPIO38/39");
     }
-    {
-        /* Pixel 0 (nearest GPIO9) red, pixel 1 green, steady. */
-        static const CHAT_ROBOT_RGB_T leds[CHAT_ROBOT_WS2812_COUNT] = {{255, 0, 0}, {0, 255, 0}};
-        if (OPRT_OK != chat_robot_ws2812_hold(leds)) {
-            PR_ERR("WS2812 LEDs on GPIO9 not started");
-        }
-    }
     if (OPRT_OK != gw_setup()) {
         PR_ERR("setup failed");
         while (1) {
             tal_system_sleep(1000);
+        }
+    }
+    {
+        /* Started after the audio driver is up. Pixel 0 (nearest GPIO9) red,
+         * pixel 1 green, steady, 30% brightness. */
+        static const CHAT_ROBOT_RGB_T leds[CHAT_ROBOT_WS2812_COUNT] = {{77, 0, 0}, {0, 77, 0}};
+        bk_printf("[gw] starting LEDs\r\n");
+        if (OPRT_OK != chat_robot_ws2812_hold(leds)) {
+            PR_ERR("WS2812 LEDs on GPIO9 not started");
         }
     }
 
@@ -923,7 +995,7 @@ static void user_main(void)
         if (!s_wifi_up) {
             gw_wifi_wait();
         }
-        if (0 == gw_connect() && GW_OK == gw_handshake()) {
+        if (0 == gw_auth_prepare() && 0 == gw_connect() && GW_OK == gw_handshake()) {
             gw_idle();
         }
         gw_disconnect();

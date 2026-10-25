@@ -21,6 +21,14 @@
 #define GW_TOKEN         "demo-token-12345"
 #define GW_FIRMWARE      "1.0.1-test"
 
+/* Auth Device SDK v0.10. Leave the base URL empty while using the local
+ * Gateway test token. Once the Auth service is provisioned, set the HTTPS
+ * origin and endpoint UUID; the activation code is read from KV when empty. */
+#define GW_AUTH_BASE_URL         ""
+#define GW_AUTH_ENDPOINT_ID     ""
+#define GW_AUTH_ACTIVATION_CODE ""
+#define GW_AUTH_REQUIRED        0
+
 /* Speaker volume 0-100. The verified tone test uses 25. */
 #define GW_VOLUME        50
 
